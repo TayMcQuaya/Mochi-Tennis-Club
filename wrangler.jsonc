@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // This name has to be the same as the project name in the Cloudflare dashboard.
+  "name": "mochi-tennis-club",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+  // The game page. Files in here are served as they are.
+  "assets": { "directory": "./public" },
+  // One room per club code, for players to find each other.
+  "durable_objects": { "bindings": [{ "name": "ROOM", "class_name": "Room" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+}

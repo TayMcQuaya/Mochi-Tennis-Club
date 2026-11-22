@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mochi Tennis Club</title>
+<meta name="theme-color" content="#ffe9ef">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Mochi Tennis">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Mochiy+Pop+One&family=Nunito:wght@600;800;900&display=swap" rel="stylesheet">
 <style>
@@ -128,6 +132,7 @@ body.touch #prompt{bottom:auto;top:62px}
 .mbtn.back{background:none;border-color:transparent;box-shadow:none;color:var(--ink-soft);min-height:40px;font-size:16px;width:auto;align-self:flex-start}
 .mbtn.back::after{display:none}
 .mbtn:disabled{opacity:.5;cursor:default}
+.mbtn[hidden]{display:none}
 .mbtn.lv::after{display:none}
 .pips{display:flex;gap:5px;flex:none}
 .pips i{width:13px;height:13px;border-radius:50%;background:rgba(75,47,63,.14)}
@@ -298,6 +303,8 @@ button:focus-visible,a:focus-visible{outline:3px solid var(--sky);outline-offset
       <div class="panel" id="mOnline" hidden>
         <h2>Play with friends</h2>
         <button class="mbtn hot" id="btnOpen" type="button" disabled>Open a court</button>
+        <button class="mbtn hot" id="btnClub" type="button" hidden>Start a club</button>
+        <button class="mbtn" id="btnInvite" type="button" hidden>Copy invite link</button>
         <h3 id="clubCount">Courts open now</h3>
         <div class="courts" id="courts"><p class="note">Looking for open courts…</p></div>
         <button class="mbtn back" type="button" data-back>Back</button>
@@ -633,7 +640,7 @@ function cpuMove(s, dt, live) {
 /* ---------------------------------------------------------------- online: everything travels as presence */
 const net = { room: null, state: 'connecting', peers: [], list: [], dirty: true, myPeer: null,
   court: null, seat: -1, sat: 0, intent: 'play', again: -1, occ: [null, null], live: false,
-  sent: {}, lastPush: 0, flush: false, sw: 0, pq: 0, pqAt: 0, pqSent: {}, pa: null, seenPq: -1, lag: 0.09, host: false };
+  sent: {}, why: '', busy: false, lastPush: 0, flush: false, sw: 0, pq: 0, pqAt: 0, pqSent: {}, pa: null, seenPq: -1, lag: 0.09, host: false };
 const PKEYS = ['v', 'nick', 'dog', 'court', 'seat', 'sat', 'stg', 'wn', 'again', 'pq', 'pa', 'sw', 'x', 'y', 'm'];
 
 const num = (v, d) => (typeof v === 'number' && isFinite(v)) ? v : d;
@@ -677,9 +684,97 @@ function parsePeers() {
   });
   net.dirty = false;
 }
+/* ---------------------------------------------------------------- own server */
+// On its own web address the page talks to its own small server (src/worker.js in the repo). The object below offers the
+// same two calls the game already uses inside Claude (presence and onPeers), so the rest of the game does not care which one it got.
+// Players who share a club code (it sits in the invite link) see each other's courts. Nobody else does.
+const club = { code: null, own: false };
+const validClub = v => typeof v === 'string' && /^[a-z0-9]{8,24}$/.test(v);
+function ownRoom(code) {
+  let id = null; try { id = sessionStorage.getItem('mtc-peer'); } catch (e) {}
+  if (!/^[a-z0-9]{8,16}$/.test(id || '')) { id = ''; for (let i = 0; i < 10; i++) id += 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]; try { sessionStorage.setItem('mtc-peer', id); } catch (e) {} }
+  const mine = {}, others = new Map(), hs = new Set(), WAITS = [400, 900, 1800, 3000, 4000];
+  let ws = null, up = false, over = false, tries = 0, lost = null, pong = 0;
+  const tell = () => {
+    const arr = [{ peer: id, isMe: true, sameTab: true, kind: 'viewer', presence: mine }];
+    for (const [k, v] of others) arr.push({ peer: k, isMe: false, sameTab: false, kind: 'viewer', presence: v });
+    hs.forEach(h => { try { h({ peers: arr }); } catch (e) {} });
+  };
+  const stop = () => { if (over) return; over = true; clearInterval(beat); try { if (ws) ws.close(); } catch (e) {} if (lost) lost(); };
+  const beat = setInterval(() => {                       // keep the line open, and notice when it has gone quiet
+    if (over || !up) return;
+    if (Date.now() - pong > 50000) { try { ws.close(); } catch (e) {} return; }
+    try { ws.send('ping'); } catch (e) {}
+  }, 20000);
+  function connect() {
+    return new Promise(done => {
+      let sock; try { sock = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?club=' + code + '&peer=' + id); } catch (e) { done(false); return; }
+      ws = sock;
+      const slow = setTimeout(() => { try { sock.close(); } catch (e) {} }, 7000);
+      sock.onmessage = e => {
+        if (e.data === 'pong') { pong = Date.now(); return; }
+        let d; try { d = JSON.parse(e.data); } catch (err) { return; }
+        if (!d) return;
+        if (d.t === 'hi') {
+          clearTimeout(slow); up = true; tries = 0; pong = Date.now(); others.clear();
+          for (const pr of (Array.isArray(d.peers) ? d.peers : [])) if (Array.isArray(pr) && typeof pr[0] === 'string') others.set(pr[0], pr[1] && typeof pr[1] === 'object' ? pr[1] : {});
+          if (Object.keys(mine).length) try { sock.send(JSON.stringify({ t: 'p', d: mine, f: 1 })); } catch (err) {}
+          tell(); done(true);
+        } else if (d.t === 'p' && typeof d.id === 'string' && d.id !== id && d.d && typeof d.d === 'object') {
+          const cur = d.f ? {} : Object.assign({}, others.get(d.id));
+          for (const k in d.d) { if (d.d[k] === null) delete cur[k]; else cur[k] = d.d[k]; }
+          others.set(d.id, cur); tell();
+        } else if (d.t === 'bye' && typeof d.id === 'string') { others.delete(d.id); tell(); }
+      };
+      sock.onclose = () => {
+        clearTimeout(slow); if (sock !== ws) return;
+        const was = up; up = false; done(false);
+        if (over || !was) return;                          // a line that was open and dropped: try to get it back for a few seconds
+        (function again() {
+          if (over) return;
+          if (tries >= WAITS.length) { stop(); return; }
+          setTimeout(() => { if (!over) connect().then(ok => { if (!ok) again(); }); }, WAITS[tries++]);
+        })();
+      };
+      sock.onerror = () => {};
+    });
+  }
+  const room = {
+    presence(patch) {
+      const out = {}; let any = false;
+      for (const k in patch) { if (patch[k] === null || patch[k] === undefined) { delete mine[k]; out[k] = null; } else { mine[k] = patch[k]; out[k] = patch[k]; } any = true; }
+      if (any && up) try { ws.send(JSON.stringify({ t: 'p', d: out })); } catch (e) {}
+      return Promise.resolve();
+    },
+    onPeers(h, onLost) { hs.add(h); if (onLost) lost = onLost; queueMicrotask(tell); return () => hs.delete(h); },
+    close() { over = true; clearInterval(beat); try { if (ws) ws.close(); } catch (e) {} },
+    _drop() { try { if (ws) ws.close(); } catch (e) {} },      // tests only: cut the line as a bad connection would
+  };
+  return connect().then(ok => { if (ok) return room; over = true; clearInterval(beat); return null; });
+}
+function inviteLink() { return location.origin + location.pathname + '?club=' + club.code; }
+function startClub() {
+  let c = ''; for (let i = 0; i < 10; i++) c += 'abcdefghjkmnpqrstuvwxyz23456789'[Math.floor(Math.random() * 31)];
+  club.code = c; try { localStorage.setItem('mtc-club', c); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname + '?club=' + c); } catch (e) {}
+  initNet();
+}
+async function shareInvite() {
+  const url = inviteLink(), btn = $('btnInvite'), say = t => { btn.textContent = t; clearTimeout(shareInvite.t); shareInvite.t = setTimeout(() => { btn.textContent = 'Copy invite link'; }, 1800); };
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) { try { await navigator.share({ title: 'Mochi Tennis Club', text: 'Come play tennis with me', url }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+  try { await navigator.clipboard.writeText(url); say('Link copied'); }
+  catch (e) { try { window.prompt('Copy this link and send it to your friends', url); } catch (err) {} }
+}
+
 async function initNet() {
-  let room = null;
+  if (net.busy) return; net.busy = true;
+  let room = null; net.why = ''; net.state = 'connecting'; net.sent = {}; renderLobby();
   try { if (window.claude && typeof window.claude.use === 'function') room = await window.claude.use('room'); } catch (e) {}
+  if (!room && club.own) {
+    if (!club.code) net.why = 'noclub';
+    else { try { room = await ownRoom(club.code); } catch (e) { room = null; } if (!room) net.why = 'lost'; }
+  }
+  net.busy = false;
   if (!room) { net.state = 'off'; renderLobby(); return; }
   net.room = room; net.state = 'on';
   try {
@@ -689,7 +784,7 @@ async function initNet() {
   renderLobby();
 }
 function netLost() {
-  net.room = null; net.state = 'off'; net.peers = []; net.list = [];
+  net.room = null; net.state = 'off'; net.peers = []; net.list = []; if (club.own) net.why = 'lost';
   if (mode === 'online') { goHome(); banner('Connection lost'); }
   renderLobby();
 }
@@ -1056,15 +1151,22 @@ function renderLobby() {
   lobbyAt = NOW;
   const box = $('courts'); box.textContent = '';
   $('btnOpen').disabled = net.state !== 'on';
+  const noClub = net.state === 'off' && net.why === 'noclub';
+  $('btnOpen').hidden = noClub; $('btnClub').hidden = !noClub; $('btnInvite').hidden = !(club.own && club.code && net.state === 'on');
   const note = txt => { const p = document.createElement('p'); p.className = 'note'; p.textContent = txt; box.appendChild(p); };
   if (net.state === 'connecting') { note('Looking for open courts…'); return; }
+  if (noClub) { $('clubCount').textContent = 'Your own club'; note('Start a club and you get a link to send to your friends. Only people with that link can see your courts. If a friend already sent you a link, open that one instead.'); return; }
+  if (net.state === 'off' && net.why === 'lost') {
+    $('clubCount').textContent = 'Online play'; note('Could not reach the club right now.');
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost'; b.textContent = 'Try again'; b.addEventListener('click', () => initNet()); box.appendChild(b); return;
+  }
   if (net.state === 'off') { $('clubCount').textContent = 'Online play'; note('Online play is not available here. Practice works everywhere.'); return; }
   if (net.dirty) parsePeers();
   const courts = new Map();
   for (const p of net.list) { if (!p.court || p.self) continue; if (!courts.has(p.court)) courts.set(p.court, []); courts.get(p.court).push(p); }
   const n = net.list.length;
   $('clubCount').textContent = n > 1 ? 'Courts open now · ' + n + ' poodles in the club' : 'Courts open now';
-  if (!courts.size) { note('No courts open yet. Open one, then ask a friend to open this page.'); return; }
+  if (!courts.size) { note(club.own ? 'No courts open yet. Open one and send your friends the invite link.' : 'No courts open yet. Open one, then ask a friend to open this page.'); return; }
   for (const [code, ps] of courts) {
     const seated = [0, 1].map(s => ps.filter(p => p.seat === s).sort((a, b) => a.sat - b.sat || (a.peer < b.peer ? -1 : 1))[0] || null);
     const count = seated.filter(Boolean).length;
@@ -1084,7 +1186,7 @@ function renderLobby() {
     btn.addEventListener('click', () => { audioOn(); const go = () => enterCourt(code, count === 2 ? 'watch' : 'play', false); if (count === 2) go(); else needGuide(go); });
     row.appendChild(t); row.appendChild(btn); box.appendChild(row);
   }
-  if (!box.children.length) note('No courts open yet. Open one, then ask a friend to open this page.');
+  if (!box.children.length) note(club.own ? 'No courts open yet. Open one and send your friends the invite link.' : 'No courts open yet. Open one, then ask a friend to open this page.');
 }
 
 /* ---------------------------------------------------------------- drawing: a low chase camera, paper cutouts standing on the court */
@@ -2062,6 +2164,8 @@ window.addEventListener('keydown', e => {              // the menu works from th
   list[(at + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length].focus(); e.preventDefault();
 });
 $('btnOpen').addEventListener('click', () => { audioOn(); pending = 'open'; showPanel('stage'); });
+$('btnClub').addEventListener('click', () => { audioOn(); startClub(); });
+$('btnInvite').addEventListener('click', () => { audioOn(); shareInvite(); });
 $('btnWaitLeave').addEventListener('click', goHome);
 $('btnOverLeave').addEventListener('click', goHome);
 $('btnAgain').addEventListener('click', () => {
@@ -2101,6 +2205,14 @@ if (window.ResizeObserver) new ResizeObserver(resize).observe($('stage')); else 
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { buildSprites(); });
 goHome();
 requestAnimationFrame(frame);
+club.own = !window.claude && /^https?:$/.test(location.protocol) && !/claude|anthropic/i.test(location.hostname);
+if (club.own) {
+  let c = null; try { c = new URLSearchParams(location.search).get('club'); } catch (e) {}
+  if (!validClub(c)) { try { c = localStorage.getItem('mtc-club'); } catch (e) { c = null; } }
+  if (validClub(c)) { club.code = c; try { localStorage.setItem('mtc-club', c); } catch (e) {} }
+  const l = document.createElement('link'); l.rel = 'manifest'; l.href = '/manifest.webmanifest'; document.head.appendChild(l);     // lets phones add the game to the home screen
+  const a = document.createElement('link'); a.rel = 'apple-touch-icon'; a.href = '/icon-180.png'; document.head.appendChild(a);
+}
 initNet();
 (async () => {                                   // suggest the viewer's first name when the page is told it
   try {
@@ -2112,7 +2224,7 @@ initNet();
 })();
 
 if (window.__MTC_TEST) {
-  window.__mtc = { get m() { return m; }, P, net, get mode() { return mode; }, get auth() { return [...auth]; }, get human() { return human; }, stam, podium,
+  window.__mtc = { get m() { return m; }, P, net, club, art: { paper, drawPoodle, COATS, BOWS }, get mode() { return mode; }, get auth() { return [...auth]; }, get human() { return human; }, stam, podium,
     end(w) { setM(Object.assign({}, m, { rev: m.rev + 1, a: w === 0 ? m.win : Math.min(m.a, m.win - 1), b: w === 1 ? m.win : Math.min(m.b, m.win - 1), ph: 'over', shot: null, w, pt: { w, n: m.rev + 1, k: 0, h: 0 } })); },
     teamDemo() { podium.demo = [[{ nick: 'Tay', dog: 0, seat: 0 }, { nick: 'Mika', dog: 3, seat: 0 }], [{ nick: 'Ana', dog: 1, seat: 1 }, { nick: 'Rio', dog: 4, seat: 1 }]]; },
     aim() {
