@@ -4,6 +4,24 @@ A small tennis game with toy poodles. Play against the computer or against a fri
 
 A game by [taymcquaya](https://x.com/TayMcQuaya).
 
+## Play it
+
+https://mochi-tennis-club.taymcquaya.workers.dev
+
+## How to play with a friend
+
+You (the one inviting):
+
+1. Open the link above and press "Play with friends".
+2. Press "Copy invite link" and send the link to your friend. The first time, press "Start a club" before that.
+3. Press "Open a court" and pick a court.
+
+Your friend:
+
+1. Opens the link you sent.
+2. Presses "Play with friends".
+3. Presses "Join" on your court.
+
 ## What is in here
 
 - `public/index.html` is the whole game in one file.
